@@ -2,6 +2,7 @@ import asyncio
 import json
 import sys
 import os
+from playwright.async_api import async_playwright
 from crawl4ai import AsyncWebCrawler
 from crawl4ai.extraction_strategy import JsonCssExtractionStrategy
 
@@ -9,77 +10,55 @@ from crawl4ai.extraction_strategy import JsonCssExtractionStrategy
 async def search_flights(origin, destination, date):
     url = f"https://www.kayak.com/flights/{origin}-{destination}/{date}"
 
-    # Updated schema based on the new HTML structure
-    schema = {
-        "name": "Flight Results",
-        "baseSelector": "li.hJSA-item",  # Updated selector to target each flight item
-        "fields": [
-            {"name": "airline", "selector": ".c3J0r-container .c5iUd-leg-carrier img", "type": "attr", "attr": "alt"},
-            {"name": "departure_time", "selector": ".VY2U .vmXl-mod-variant-large span:nth-of-type(1)", "type": "text"},
-            {"name": "arrival_time", "selector": ".VY2U .vmXl-mod-variant-large span:nth-of-type(3)", "type": "text"},
-            {"name": "duration", "selector": ".xdW8 .vmXl-mod-variant-default", "type": "text"},
-            {"name": "stops", "selector": ".JWEO .JWEO-stops-text", "type": "text"},
-            {"name": "price", "selector": ".zx8F-price-tile .f8F1-price-text", "type": "text"},
-            {"name": "fare_type", "selector": ".DOum-option .DOum-name", "type": "text"},
-            {"name": "provider", "selector": ".M_JD-provider-name", "type": "text"},
-        ]
-    }
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=False)
+        context = await browser.new_context()
+        page = await context.new_page()
 
-    extraction_strategy = JsonCssExtractionStrategy(schema, verbose=True)
+        await page.goto(url, wait_until="networkidle")
 
-    async with AsyncWebCrawler(
-        verbose=True,
-        headless=False,              # Set to False for debugging
-        screenshot=True,             # Enable screenshot capture
-        magic=True,                  # Enable anti-detection features
-        simulate_user=True,
-        override_navigator=True,
-    ) as crawler:
-        # Create a directory to store screenshots and debug files
-        debug_dir = "debug_files"
-        os.makedirs(debug_dir, exist_ok=True)
-
+        # Wait for and accept cookies if the banner appears
         try:
-            result = await crawler.arun(
-                url=url,
-                extraction_strategy=extraction_strategy,
-                wait_for="#listWrapper",  # Updated wait selector
-                js_code=[
-                    # Accept cookies if the consent popup appears
-                    "document.querySelector('[id^=onetrust-accept]')?.click();",
-                    "document.querySelector('.consent-button')?.click();",
-                    # Scroll to the bottom to load more results
-                    "window.scrollTo(0, document.body.scrollHeight);",
-                ],
-                page_timeout=180000,          # Increase timeout to 3 minutes
-                delay_before_return_html=5.0, # Wait 5 seconds before capturing content
-                bypass_cache=True
-            )
+            await page.click('[id^=onetrust-accept]', timeout=5000)
+        except:
+            print("No cookie banner found or couldn't be clicked.")
 
-            # Save a screenshot for debugging
-            screenshot_path = os.path.join(debug_dir, f"flight_search_{origin}_{destination}_{date}.png")
-            if result.screenshot:
-                with open(screenshot_path, "wb") as f:
-                    f.write(result.screenshot)
-                print(f"Screenshot saved to {screenshot_path}")
-            else:
-                print("No screenshot captured.")
+        # Wait for flight results to load
+        await page.wait_for_selector('div[data-resultid]', timeout=60000)
 
-            if result.success:
-                flights = json.loads(result.extracted_content)
-                return flights
-            else:
-                print(f"Error: {result.error_message}")
-                # Save the HTML content for debugging
-                html_path = os.path.join(debug_dir, f"error_{origin}_{destination}_{date}.html")
-                with open(html_path, "w", encoding="utf-8") as f:
-                    f.write(result.html)
-                print(f"HTML content saved to {html_path} for debugging.")
-                return []
+        # Scroll to load all results
+        for _ in range(5):  # Adjust the number of scrolls as needed
+            await page.evaluate('window.scrollTo(0, document.body.scrollHeight)')
+            await asyncio.sleep(2)
 
-        except Exception as e:
-            print(f"Exception occurred: {e}")
-            return []
+        # Extract flight data
+        flights = await page.evaluate('''
+            () => {
+                const flightElements = document.querySelectorAll('div[data-resultid]');
+                return Array.from(flightElements).map(el => {
+                    return {
+                        airline: el.querySelector('div[dir="auto"]')?.textContent.trim(),
+                        times: el.querySelector('.vmXl-mod-variant-large')?.textContent.trim(),
+                        price: el.querySelector('.f8F1-price-text')?.textContent.trim(),
+                        stops: el.querySelector('.JWEO-stops-text')?.textContent.trim(),
+                        layover_airport: el.querySelector('.JWEO .c_cgF-mod-variant-default span')?.textContent.trim(),
+                        duration: el.querySelector('.xdW8 .vmXl-mod-variant-default')?.textContent.trim(),
+                        origin: el.querySelector('.EFvI div:first-child span')?.textContent.trim(),
+                        destination: el.querySelector('.EFvI div:last-child span')?.textContent.trim(),
+                        fare_type: el.querySelector('.DOum-name')?.textContent.trim(),
+                        provider: el.querySelector('.M_JD-provider-name')?.textContent.trim()
+                    };
+                });
+            }
+        ''')
+        # Capture a screenshot
+        await page.screenshot(path=f"debug_files/flight_search_{origin}_{destination}_{date}.png")
+        # Save the HTML content
+        html_content = await page.content()
+        with open(f"debug_files/flight_search_{origin}_{destination}_{date}.html", "w", encoding="utf-8") as f:
+            f.write(html_content)
+        await browser.close()
+        return flights
 
 
 def main():
@@ -101,10 +80,12 @@ def main():
             for idx, flight in enumerate(flights, 1):
                 f.write(f"## Flight {idx}\n")
                 f.write(f"- **Airline:** {flight.get('airline', 'N/A')}\n")
-                f.write(f"- **Departure Time:** {flight.get('departure_time', 'N/A')}\n")
-                f.write(f"- **Arrival Time:** {flight.get('arrival_time', 'N/A')}\n")
+                f.write(f"- **Times:** {flight.get('times', 'N/A')}\n")
                 f.write(f"- **Duration:** {flight.get('duration', 'N/A')}\n")
+                f.write(f"- **Origin:** {flight.get('origin', 'N/A')}\n")
+                f.write(f"- **Destination:** {flight.get('destination', 'N/A')}\n")
                 f.write(f"- **Stops:** {flight.get('stops', 'N/A')}\n")
+                f.write(f"- **Layover Airport:** {flight.get('layover_airport', 'N/A')}\n")
                 f.write(f"- **Price:** {flight.get('price', 'N/A')}\n")
                 f.write(f"- **Fare Type:** {flight.get('fare_type', 'N/A')}\n")
                 f.write(f"- **Provider:** {flight.get('provider', 'N/A')}\n\n")
