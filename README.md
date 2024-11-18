@@ -18,6 +18,8 @@ This Python script automates the process of searching for flights on Kayak.com. 
 - Python 3.10
 - Crawl4AI library
 - Playwright (automatically installed with Crawl4AI)
+- Conda (for environment management)
+
 
 ## Installation
 
@@ -29,8 +31,9 @@ This Python script automates the process of searching for flights on Kayak.com. 
 
 2. Create and activate a virtual environment:
    ```
-   python -m venv venv
-   source venv/bin/activate  # On Windows use `venv\Scripts\activate`
+   conda create -n kayak_crawler python=3.10
+   conda activate kayak_crawler
+   conda install pip
    ```
 
 3. Install the required packages:
